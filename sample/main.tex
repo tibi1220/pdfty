@@ -1,0 +1,100 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations.pathmorphing,backgrounds,positioning,fit,petri}
+\usetikzlibrary{arrows.meta,graphs,graphdrawing} \usegdlibrary{layered}
+
+\begin{document}
+
+\section{Some lorem ipsum}
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Mauris quis nisl lorem. Etiam finibus diam sed sem imperdiet pharetra. Suspendisse orci tortor, interdum vel risus vitae, tristique porttitor lacus. Sed fringilla lorem sed nisl blandit, ac posuere magna rhoncus. In eleifend metus eu odio rhoncus, aliquam aliquet sapien consequat. Donec cursus, tellus sit amet sagittis ultrices, erat erat lobortis ipsum, at condimentum nibh ante sed nulla. Maecenas dictum lacus elit, eu consectetur sapien faucibus eu. Praesent aliquet dolor at leo sagittis viverra. Aliquam ultricies imperdiet enim at fermentum. Aliquam volutpat sem vitae velit volutpat, et ultricies enim faucibus. Donec congue nunc vel metus iaculis dapibus. Etiam sit amet lorem quam. Vivamus quis turpis id ante commodo mattis vitae eget nunc. Proin malesuada augue at sapien lobortis, ac consectetur turpis fermentum.
+
+Mauris accumsan bibendum eros a lobortis. Nunc ornare leo sit amet libero eleifend rutrum. Proin pharetra eleifend purus nec venenatis. Vivamus elementum quis nulla vel elementum. Aliquam vel tellus vitae eros faucibus porta. Nam magna libero, ornare ut maximus ut, ullamcorper sit amet sapien. Vivamus tincidunt et libero lacinia cursus. Nullam a lorem purus. Donec et tempus dui. Suspendisse porttitor velit augue. Ut eget lobortis tortor. Etiam mollis felis sed orci posuere, a venenatis diam fermentum.
+
+Aliquam et dui auctor, rhoncus ipsum eget, aliquet nisi. Sed nec venenatis mi. Integer non fermentum arcu. Donec eget rhoncus erat. Praesent suscipit feugiat arcu cursus tempor. Aliquam et odio ultricies, hendrerit neque sit amet, congue felis. Pellentesque commodo pellentesque dolor ac ultricies. Etiam gravida lobortis odio, imperdiet venenatis nunc placerat in. Cras rutrum quam at nulla fringilla mattis. Morbi auctor enim quis justo consequat, ut imperdiet diam aliquam. Sed vitae quam non leo fermentum convallis.
+
+\section{Some tikz picture}
+
+\begin{center}
+	\begin{tikzpicture}[yscale=-1.6,xscale=1.5,thick,
+			every transition/.style={draw=red,fill=red!20,minimum size=3mm},
+			every place/.style={draw=blue,fill=blue!20,minimum size=6mm}]
+
+		\foreach \i in {1,...,6} {
+				\node[place,label=left:$p_\i$] (p\i) at (0,\i) {};
+				\node[place,label=right:$q_\i$] (q\i) at (8,\i) {};
+			}
+		\foreach \name/\var/\vala/\valb/\height/\x in
+			{m1/m_1/f/t/2.25/3,m2/m_2/f/t/2.25/5,h/\mathit{hold}/1/2/4.5/4} {
+				\node[place,label=above:{$\var = \vala$}] (\name\vala) at (\x,\height) {};
+				\node[place,yshift=-8mm,label=below:{$\var = \valb$}] (\name\valb) at (\x,\height) {};
+			}
+		\node[token] at (p1) {};   \node[token] at (q1) {};
+		\node[token] at (m1f) {};  \node[token] at (m2f) {};
+		\node[token] at (h1) {};
+
+		\node[transition] at (1.5,1.5) {}  edge [pre] (p1)  edge [post] (p2);
+		\node[transition] at (1.5,2.5) {}  edge [pre] (p2)  edge[pre]   (m1f)
+		edge [post](p3)  edge[post]  (m1t);
+		\node[transition] at (1.5,3.3) {}  edge [pre] (p3)  edge [post] (p4)
+		edge [pre and post] (h1);
+		\node[transition] at (1.5,3.7) {}  edge [pre] (p3)  edge [pre] (h2)
+		edge [post] (p4) edge [post] (h1.west);
+		\node[transition] at (1.5,4.3) {}  edge [pre] (p4)  edge [post] (p5)
+		edge [pre and post] (m2f);
+		\node[transition] at (1.5,4.7) {}  edge [pre] (p4)  edge [post] (p5)
+		edge [pre and post] (h2);
+		\node[transition] at (1.5,5.5) {}  edge [pre] (p5)  edge [pre] (m1t)
+		edge [post] (p6) edge [post] (m1f);
+		\node[transition] at (1.5,6.5) {}  edge [pre] (p6)  edge [post] (p1.south east);
+		\node[transition] at (6.5,1.5) {}  edge [pre] (q1)  edge [post] (q2);
+		\node[transition] at (6.5,2.5) {}  edge [pre] (q2)  edge [pre] (m2f)
+		edge [post] (q3) edge [post] (m2t);
+		\node[transition] at (6.5,3.3) {}  edge [pre] (q3)  edge [post] (q4)
+		edge [pre and post] (h2);
+		\node[transition] at (6.5,3.7) {}  edge [pre] (q3)  edge [pre] (h1)
+		edge [post] (q4) edge [post] (h2.east);
+		\node[transition] at (6.5,4.3) {}  edge [pre] (q4)  edge [post] (q5)
+		edge [pre and post] (m1f);
+		\node[transition] at (6.5,4.7) {}  edge [pre] (q4)  edge [post] (q5)
+		edge [pre and post] (h1);
+		\node[transition] at (6.5,5.5) {}  edge [pre] (q5)  edge [pre] (m2t)
+		edge [post] (q6) edge [post] (m2f);
+		\node[transition] at (6.5,6.5) {}  edge [pre] (q6)  edge [post] (q1.south west);
+	\end{tikzpicture}
+\end{center}
+
+
+\section{Some other tikz picture}
+
+\begin{center}
+	\tikz [nodes={text height=.7em, text depth=.2em,
+				draw=black!20, thick, fill=white, font=\footnotesize},
+		>={Stealth[round,sep]}, rounded corners, semithick]
+	\graph [layered layout, level distance=1cm, sibling sep=.5em, sibling distance=1cm] {
+		"5th Edition" -> { "6th Edition", "PWB 1.0" };
+		"6th Edition" -> { "LSX" [>child anchor=45],  "1 BSD", "Mini Unix", "Wollongong", "Interdata" };
+		"Interdata" -> { "Unix/TS 3.0", "PWB 2.0", "7th Edition" };
+		"7th Edition" -> { "8th Edition", "32V", "V7M", "Ultrix-11", "Xenix", "UniPlus+" };
+		"V7M" -> "Ultrix-11";
+		"8th Edition" -> "9th Edition";
+		"1 BSD" -> "2 BSD" -> "2.8 BSD" -> { "Ultrix-11", "2.9 BSD" };
+		"32V" -> "3 BSD" -> "4 BSD" -> "4.1 BSD" -> { "4.2 BSD", "2.8 BSD", "8th Edition" };
+		"4.2 BSD" -> { "4.3 BSD", "Ultrix-32" };
+		"PWB 1.0" -> { "PWB 1.2" -> "PWB 2.0", "USG 1.0" -> { "CB Unix 1", "USG 2.0" }};
+		"CB Unix 1" -> "CB Unix 2" -> "CB Unix 3" -> { "Unix/TS++", "PDP-11 Sys V" };
+		{ "USG 2.0" -> "USG 3.0", "PWB 2.0", "Unix/TS 1.0" } -> "Unix/TS 3.0";
+		{ "Unix/TS++", "CB Unix 3", "Unix/TS 3.0" } -> "TS 4.0" -> "System V.0" -> "System V.2" -> "System V.3";
+	};
+\end{center}
+
+\section{Some more lorem ipsum}
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Mauris quis nisl lorem. Etiam finibus diam sed sem imperdiet pharetra. Suspendisse orci tortor, interdum vel risus vitae, tristique porttitor lacus. Sed fringilla lorem sed nisl blandit, ac posuere magna rhoncus. In eleifend metus eu odio rhoncus, aliquam aliquet sapien consequat. Donec cursus, tellus sit amet sagittis ultrices, erat erat lobortis ipsum, at condimentum nibh ante sed nulla. Maecenas dictum lacus elit, eu consectetur sapien faucibus eu. Praesent aliquet dolor at leo sagittis viverra. Aliquam ultricies imperdiet enim at fermentum. Aliquam volutpat sem vitae velit volutpat, et ultricies enim faucibus. Donec congue nunc vel metus iaculis dapibus. Etiam sit amet lorem quam. Vivamus quis turpis id ante commodo mattis vitae eget nunc. Proin malesuada augue at sapien lobortis, ac consectetur turpis fermentum.
+
+Mauris accumsan bibendum eros a lobortis. Nunc ornare leo sit amet libero eleifend rutrum. Proin pharetra eleifend purus nec venenatis. Vivamus elementum quis nulla vel elementum. Aliquam vel tellus vitae eros faucibus porta. Nam magna libero, ornare ut maximus ut, ullamcorper sit amet sapien. Vivamus tincidunt et libero lacinia cursus. Nullam a lorem purus. Donec et tempus dui. Suspendisse porttitor velit augue. Ut eget lobortis tortor. Etiam mollis felis sed orci posuere, a venenatis diam fermentum.
+
+\end{document}
