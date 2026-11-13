@@ -5,7 +5,6 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     os::unix::{ffi::OsStrExt, fs::FileTypeExt},
     path::{Path, PathBuf},
-    sync::mpsc::Sender,
     thread,
 };
 
@@ -159,7 +158,7 @@ impl Socket {
     pub fn start(
         path: PathBuf,
         viewer_pdf: Option<PathBuf>,
-        tx: Sender<Message>,
+        deliver: impl Fn(Message) -> bool + Send + 'static,
     ) -> Result<Self, String> {
         // A live viewer with the same PDF already owns this deterministic path.
         // Only unlink an old socket when connecting to it fails.
@@ -189,10 +188,13 @@ impl Socket {
                     let response = match serde_json::from_str::<Message>(&line) {
                         Ok(mut message) => match normalize_pdf(&mut message, viewer_pdf.as_deref())
                         {
-                            Ok(()) => match tx.send(message) {
-                                Ok(()) => "ok\n",
-                                Err(_) => "viewer stopped\n",
-                            },
+                            Ok(()) => {
+                                if deliver(message) {
+                                    "ok\n"
+                                } else {
+                                    "viewer stopped\n"
+                                }
+                            }
                             Err(_) => "PDF path does not match viewer\n",
                         },
                         Err(_) => "invalid request\n",
@@ -281,7 +283,7 @@ mod tests {
         fs::write(&pdf, []).unwrap();
         let socket_path = dir.join("control.sock");
         let (tx, rx) = mpsc::channel();
-        let socket = Socket::start(socket_path.clone(), None, tx).unwrap();
+        let socket = Socket::start(socket_path.clone(), None, move |m| tx.send(m).is_ok()).unwrap();
         let mut stream = UnixStream::connect(&socket_path).unwrap();
         let request = serde_json::to_string(&Message::Add {
             pdf: pdf.clone(),
@@ -310,7 +312,7 @@ mod tests {
         let pdf = fs::canonicalize(pdf).unwrap();
         let path = dir.join("document.sock");
         let (tx, rx) = mpsc::channel();
-        let socket = Socket::start(path.clone(), Some(pdf.clone()), tx).unwrap();
+        let socket = Socket::start(path.clone(), Some(pdf.clone()), move |m| tx.send(m).is_ok()).unwrap();
         let send = |request: serde_json::Value| {
             let mut stream = UnixStream::connect(&path).unwrap();
             writeln!(stream, "{request}").unwrap();

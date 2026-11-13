@@ -13,7 +13,8 @@ vim.fn.systemlist = function(args)
         table.insert(viewer_commands, args[1])
 		return { "/tmp/main.sock\t" .. pdf, "/tmp/other.sock\t" .. other, "/tmp/control.sock" }
 	end
-	return { "SyncTeX result begin" }
+	assert(args[2] == "--has-source", "unexpected command " .. table.concat(args, " "))
+	return {}
 end
 vim.uv.new_pipe = function()
 	return {
@@ -67,7 +68,7 @@ vim.ui.select = function(items, _, callback) callback(items[2]) end
 expect("PdftySwitch", "control", "switch", "pdf", other)
 
 for _, ex in ipairs({ "PdftyMove 0", "PdftyMove -1", "PdftyMove 1.5", "PdftyMove nonsense",
-	"PdftyMove 4294967296", "PdftyNext 0", "PdftyPrev -2", "PdftyZoom 49", "PdftyZoom 301",
+	"PdftyMove 4294967296", "PdftyNext 0", "PdftyPrev -2", "PdftyZoom 24", "PdftyZoom 501",
 	"PdftyView invalid" }) do
 	local count, notices = #messages, #notifications
 	vim.cmd(ex)
@@ -79,14 +80,14 @@ assert(vim.deep_equal(vim.fn.getcompletion("PdftyView s", "cmdline"), { "single"
 
 -- Loading the entry point twice must retain commands without duplicating hooks.
 dofile(root .. "/plugin/pdfty.lua")
-assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 4)
+assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 6)
 expect("PdftyMove 1", "control", "move", "page", 1)
 local pdfty = require("pdfty")
 pdfty.setup({ command = "custom-pdfty", auto_register = false, notifications = false,
     keymaps = { next = "<leader>pj", move = "<leader>pm", forward = false },
     resolve_pdf = function(buf) assert(buf == vim.api.nvim_get_current_buf()); return pdf end,
 })
-assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 0)
+assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 2)
 expect("PdftyNext 10", "control", "next", "count", 10)
 assert(viewer_commands[#viewer_commands] == "custom-pdfty")
 local map = vim.fn.maparg("<leader>pj", "n", false, true)
@@ -100,13 +101,24 @@ local count = #notifications
 vim.cmd("PdftyMove 0")
 assert(#notifications == count, "notifications setting ignored")
 pdfty.setup({ register_interval = 0, register_events = { "BufWritePost" } })
-assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 1)
+assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 3)
 assert(vim.fn.maparg("<leader>pj", "n") == "", "old mapping was not removed")
 pdfty.setup({ register_events = {}, register_interval = 0 })
-assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 0)
+assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 2)
 pdfty.setup()
-assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 4)
+assert(#vim.api.nvim_get_autocmds({ group = "Pdfty" }) == 6)
 expect("PdftyForward", "forward", nil, "line", 1)
 assert(viewer_commands[#viewer_commands] == "pdfty-test")
+-- Panel commands exist; open_source never targets the panel and returns
+-- false when no panel runs in this Neovim (focus is then left to the viewer).
+for _, name in ipairs({ "Pdfty", "PdftyFocus", "PdftyOpen", "PdftyClose" }) do
+	assert(vim.fn.exists(":" .. name) == 2, name .. " is missing")
+end
+vim.cmd("vsplit")
+local handled = pdfty.open_source(root .. "/sample/main.tex", 13, true)
+assert(handled == false, "open_source must not claim focus without a panel")
+assert(vim.api.nvim_win_get_cursor(0)[1] == 13, "open_source did not move the cursor")
+assert(vim.fn.expand("%:t") == "main.tex")
+
 print("Neovim commands passed (routing, validation, completion, reload, configuration, mappings)")
 vim.cmd.qa()

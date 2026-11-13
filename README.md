@@ -1,44 +1,131 @@
 # pdfty
 
-A PDF viewer for Kitty, with optional tmux support and Neovim SyncTeX integration.
+A fast PDF previewer for Kitty (directly or inside tmux), built for watching
+`latexmk` output next to Neovim, with SyncTeX forward and inverse search.
+
+## How it works
+
+Everything runs in-process; no helper programs are spawned while viewing.
+
+- **MuPDF is compiled in** (the `mupdf` crate builds it from source and links it
+  statically). Pages render on a pool of worker threads, at exactly the
+  terminal's cell pixel density, so Kitty never rescales them.
+- **Pixels are sent once.** Pages are cut into cell-aligned tiles. Each tile is
+  uploaded once with the Kitty graphics protocol and shown through Unicode
+  placeholder characters. Scrolling only rewrites placeholder text, and a pure
+  vertical scroll becomes a terminal scroll that redraws just the new rows. On
+  our side a scroll frame takes well under a millisecond.
+- **Visible tiles come first.** After every view change the worker queue is
+  re-prioritised: visible tiles first, then page text, then one screen above and
+  below. While a replacement renders (after a reload, zoom or highlight change),
+  the previous image stays on screen, so nothing flashes.
+- **SyncTeX is parsed natively** from `<name>.synctex.gz`, and Neovim is reached
+  directly over its msgpack-RPC socket. `synctex`, `nvr`, `mutool`, `pdfinfo` and
+  `kitten icat` are no longer needed.
 
 ## Requirements
 
-macOS, Kitty, Rust, `mutool`, `pdfinfo`, and `kitten` on `PATH`. SyncTeX mode
-also requires `synctex` and `nvr`.
-tmux is optional; run the viewer directly in a Kitty pane or inside tmux.
-Compile LaTeX with `-synctex=1`.
+- Kitty 0.28 or newer (Unicode placeholders).
+- Optional: tmux 3.3 or newer. pdfty sets `allow-passthrough all` on its own pane
+  and restores it on exit. tmux must pass 24-bit colour to Kitty, because image IDs
+  are encoded in the foreground colour. If images don't appear inside tmux, add
+  `set -as terminal-features ',xterm-kitty:RGB'` to your tmux config.
+- Rust, plus a C compiler (Xcode Command Line Tools on macOS). The first build
+  compiles MuPDF, which takes a minute.
+- Compile LaTeX with `-synctex=1`.
 
 ```sh
 cargo install --path . --force
-pdfty
+pdfty                 # blank viewer, waits for Neovim's :PdftyAdd
+pdfty thesis.pdf      # open a PDF directly (add --synctex for Neovim integration)
 ```
 
-Cargo builds in release mode and installs `pdfty` into `~/.cargo/bin`
-(or your configured Cargo install root). Ensure that directory is on `PATH`.
-Run the install command again after updating the source.
+Pixels are passed to Kitty in a temporary file by default, which is fastest. Over
+SSH (or with `PDFTY_TRANSFER=direct`) they are sent inline, zlib-compressed.
 
-The no-argument viewer opens blank and waits for Neovim. Open a TeX file in
-Neovim and run `:PdftyAdd` to add its compiled PDF. Repeat from other TeX
-buffers to keep multiple PDFs in the same viewer. `:PdftyForward` switches to
-the matching PDF before jumping to its source location. `[` and `]` switch PDFs
-manually. You can also open several PDFs at startup:
+Licensing note: MuPDF is AGPL-3.0, and so is any `pdfty` binary that links it.
 
-```sh
-pdfty first.pdf second.pdf --synctex
-```
+## Viewing
 
-Each PDF socket name is derived from its canonical absolute path. Use
-`pdfty document.pdf --get-socket` to print it, or `pdfty --list` (`-l`) to list
-active sockets and their PDFs. A line without a PDF is the viewer's control
-socket for adding documents. The no-argument viewer enables SyncTeX IPC; when
-starting with PDF arguments, pass `--synctex` to enable it.
+Colours follow the nightfox palette. The status line at the top shows the file, page, zoom, view mode, frames per
+second, rendering progress (tiles ready around the view), the Neovim connection
+and the latest message. Under the page, three debug lines show the newest log
+entries: SyncTeX and Neovim calls, reloads and errors. `D` hides or shows them;
+start with `--no-debug-lines` (or set `debug_lines = false` in the plugin) to
+begin without them. Continuous scrolling
+is the default view; `t` switches to single pages. The PDF reloads automatically
+when `latexmk` rewrites it, keeping your scroll position.
 
-## Neovim setup with lazy.nvim
+| Keys | Action |
+| --- | --- |
+| `j`/`k`, `↓`/`↑`, wheel | Scroll 3 rows (single view: next/previous page) |
+| `Ctrl-d`/`Ctrl-u` | Half a screen down/up |
+| `Space`, `PgDn` / `PgUp` | A screen down/up |
+| `h`/`l`, `←`/`→` | Previous/next page |
+| `g`/`G`, `Home`/`End` | First/last page; `10g` goes to page 10 |
+| `:10⏎` or `10⏎` | Go to page 10 |
+| `H`/`L`, `J`/`K`, Shift+wheel | Pan left/right, down/up |
+| `=`/`+`/`-` | Zoom in/out by 25% (25–500%), keeping the point under the cursor in place |
+| `0` | Reset zoom |
+| `t` | Toggle continuous / single-page view |
+| `[`/`]` | Previous/next PDF |
+| `r` | Reload |
+| `w`/`a`/`s`/`d` | Move the cursor (scrolls at the edges) |
+| `c` | Center the point under the cursor |
+| Left click / drag | Move the cursor / select text |
+| `v`, then move | Select text from the cursor (character precise) |
+| `y` | Copy the selection (`pbcopy`, `wl-copy`, `xclip`, else OSC 52) |
+| `i`, `Enter`, right click | Inverse search: open the source line in Neovim |
+| `I`, Ctrl+click | Inverse search and focus Neovim's tmux pane / Kitty window |
+| `Esc` | Clear selection, SyncTeX outline and pending count |
+| `D` | Show/hide the debug lines under the page |
+| `M` | Full message log, wrapped, never cut off (`j`/`k`, PgUp/PgDn, wheel scroll) |
+| `?` | Help |
+| `q` | Quit |
 
-Add this spec to your Lazy plugin list. Replace `dir` with your checkout path.
-Lazy's build step installs the executable globally with Cargo; run `:Lazy build pdfty`
-after updating the Rust source.
+A number before a movement repeats it (`5j`, `3l`, `2=`). The cursor is the `+`
+cell; it turns blue while selecting. Forward and inverse search outline the
+target paragraph in red.
+
+## Neovim
+
+### Side panel
+
+Like claudecode.nvim's Claude terminal, the plugin can run pdfty in a split
+beside your code. `:Pdfty` toggles the panel and opens the current TeX file's
+PDF. `:PdftyForward` jumps to the paragraph under your cursor and opens the
+panel first if no viewer is running. Inverse search from the panel (`i`, Enter
+or right click) shows the source in your last editor window, never in the panel
+itself; `I` also moves focus there. While hidden, the viewer keeps running, so
+showing it again is instant. It quits cleanly when Neovim exits.
+
+Inside the panel you are in terminal mode, so keys go to the viewer, except
+Ctrl-H/J/K/L. Those move to the neighbouring window, through
+vim-tmux-navigator when it is installed, so they also cross tmux panes.
+`<C-\><C-n>` returns to Normal mode, and `:PdftyFocus` (mapped below) jumps in
+and out.
+
+How images get through: Neovim's terminal emulator drops Kitty graphics
+commands but keeps text and colours. So the viewer's placeholder text flows
+through Neovim like any other output, while its image commands are handed to
+Neovim with `nvim_ui_send` (Neovim 0.12+). Neovim writes them to the real
+terminal between its own redraws, so they can't be torn apart. On older Neovim
+the viewer writes to Neovim's terminal device directly (`PDFTY_TTY`, found via
+`ps`); that works, but heavy redraws (rapid zooming) can occasionally garble a
+command. This needs `termguicolors` (the plugin warns if it is off) and Kitty,
+directly or through tmux. The cell size is read from Neovim's terminal device
+(or from tmux), because Neovim's terminal doesn't report pixel sizes.
+
+### Sockets
+
+The viewer opens a Unix socket per PDF (named from its canonical path) and a
+control socket for adding PDFs. `pdfty --list` (`-l`) prints the active sockets,
+`pdfty doc.pdf --get-socket` prints one, and `pdfty --has-source doc.pdf file.tex`
+exits 0 if the PDF was built from that source. The plugin uses these to pair TeX
+buffers with viewers. The no-argument viewer always enables IPC; with PDF arguments,
+pass `--synctex`.
+
+### lazy.nvim
 
 ```lua
 {
@@ -47,221 +134,108 @@ after updating the Rust source.
   main = "pdfty",
   ft = { "tex" },
   cmd = {
-    "PdftyAdd", "PdftyRegister", "PdftyForward", "PdftyMove",
+    "Pdfty", "PdftyFocus", "PdftyOpen", "PdftyClose", "PdftyAdd", "PdftyRegister", "PdftyForward", "PdftyMove",
     "PdftyNext", "PdftyPrev", "PdftyFirst", "PdftyLast",
     "PdftyZoom", "PdftyView", "PdftyReload", "PdftySwitch",
     "PdftyNextPdf", "PdftyPrevPdf", "PdftyCenter", "PdftyClear",
   },
   build = "cargo install --path . --force",
   opts = {
-    command = "pdfty",
-    auto_register = true,
-    register_interval = 5000,
-    notifications = true,
+    terminal = {
+      split_side = "right",
+      split_width_percentage = 0.40,
+    },
     keymaps = {
+      toggle = "<leader>pv",
+      focus = "<leader>po",
       add = "<leader>pa",
       forward = "<leader>pf",
       next = "<leader>pj",
       prev = "<leader>pk",
-      move = "<leader>pm",
       switch = "<leader>pp",
-      zoom_in = "<leader>p+",
-      zoom_out = "<leader>p-",
-      view = "<leader>pt",
-      center = "<leader>pc",
-      clear = "<leader>ph",
     },
   },
 }
 ```
 
-Start `pdfty` in another Kitty or tmux pane, open a TeX file, then use
-`<leader>pa` to add its compiled PDF and `<leader>pf` for forward search.
-With the mappings above, `3<leader>pj` advances three pages and
-`10<leader>pm` jumps to page 10. `<leader>` is your Neovim leader key.
-The plugin installs no mappings by default; only entries in `keymaps` are mapped.
-These mappings become available after the plugin loads, by opening a TeX buffer
-or running one of its commands.
+Open a TeX file and press `<leader>pv` for the panel, or `<leader>pf` to jump
+straight to the cursor's paragraph. A standalone `pdfty` in another tmux or Kitty
+pane still works as before: `:PdftyAdd` sends PDFs to it while the panel is not
+running. Inverse search from a standalone viewer opens the file in the paired
+Neovim. If no editor is paired, it falls back to the server address in
+`/tmp/vimtexserver.txt`.
 
-### Configuration
-
-Without Lazy, add this checkout to `runtimepath` and call
-`require("pdfty").setup({...})`. Calling `setup` again replaces the configuration,
-registration hooks, timer, and plugin mappings.
+Without Lazy, add the checkout to `runtimepath` and call `require("pdfty").setup({...})`.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `command` | `"pdfty"` | Executable name on `PATH`, or an absolute executable path. |
-| `auto_register` | `true` | Automatically pair TeX buffers with active viewers. |
-| `register_interval` | `5000` | Polling interval in milliseconds; `0` disables polling. |
-| `register_events` | `{ "BufEnter", "BufWritePost", "FocusLost" }` | Events that refresh pairing; `{}` disables event registration. |
-| `notifications` | `true` | Display plugin notifications, including errors. |
-| `resolve_pdf` | `nil` | Optional `function(bufnr)` returning a PDF path, or `nil` to use automatic lookup. |
-| `keymaps` | `{}` | Normal-mode mappings by action; omit an action or use `false` to leave it unmapped. |
+| `command` | `"pdfty"` | Executable name or path (`vim.g.pdfty_command` also works). |
+| `auto_register` | `true` | Pair TeX buffers with running viewers automatically. |
+| `register_interval` | `5000` | Polling interval in ms; `0` disables polling. |
+| `register_events` | `{ "BufEnter", "BufWritePost", "FocusLost" }` | Events that refresh pairing. |
+| `notifications` | `true` | Show plugin notifications and errors. |
+| `resolve_pdf` | `nil` | `function(bufnr)` returning the PDF path; overrides VimTeX lookup. |
+| `keymaps` | `{}` | Normal-mode mappings by action (`false` leaves one unmapped). |
+| `debug_lines` | `true` | Start the panel viewer with the three debug lines under the page (`D` toggles). |
+| `terminal.split_side` | `"right"` | Panel side, `"left"` or `"right"`. |
+| `terminal.split_width_percentage` | `0.40` | Panel width as a fraction of the editor. |
+| `terminal.auto_insert` | `true` | Enter terminal mode when the panel is focused. |
+| `terminal.auto_close` | `true` | Close the panel when the viewer exits (errors are always reported). |
+| `terminal.navigation_keys` | `true` | Ctrl-H/J/K/L in the panel move to the neighbouring window. |
+| `terminal.auto_open` | `true` | `:PdftyAdd` / `:PdftyForward` open the panel when no viewer runs. |
 
-Mapping actions: `add`, `register`, `forward`, `move`, `next`, `prev`, `first`,
+Mapping actions: `toggle`, `focus`, `add`, `register`, `forward`, `move`, `next`, `prev`, `first`,
 `last`, `switch`, `next_pdf`, `prev_pdf`, `zoom_in`, `zoom_out`, `zoom_reset`,
-`view`, `reload`, `center`, and `clear`. `move`, `next`, and `prev` use the Neovim numeric count.
-For compatibility, `vim.g.pdfty_command` supplies the executable when no
-`command` option is passed.
-
-The plugin discovers active `pdfty --synctex` viewers and registers Neovim
-automatically. With VimTeX it uses the compiled PDF path, including a custom
-output directory; otherwise SyncTeX finds the viewer containing the current
-source. A custom `resolve_pdf` takes precedence over VimTeX. No socket setting
-is needed.
-
-`:PdftyAdd` uses VimTeX's compiled PDF path and accepts an optional PDF path.
-Without VimTeX, it checks for a PDF beside the current TeX file. `:PdftyForward`
-jumps from the current source line; `:PdftyRegister` manually refreshes the
-pairing. Both commands accept an optional PDF path. When SyncTeX lands on a text paragraph, the viewer
-outlines that paragraph in red in either view. The outline also appears after a
-successful inverse search.
-
-### Neovim navigation commands
-
-All commands now start with `Pdfty`; update any mappings that used `PdfView`.
-Page and view commands target the PDF paired with the current TeX buffer and
-show that PDF first. With one open PDF they also work from other buffer types.
-PDF cycling acts on the viewer's currently displayed document.
+`view`, `reload`, `center`, `clear`. `move`, `next` and `prev` take the count.
 
 | Command | Action |
 | --- | --- |
-| `:PdftyAdd [pdf]` | Add a compiled PDF to the viewer. |
-| `:PdftyRegister [pdf]` | Pair the current TeX buffer with a viewer. |
-| `:PdftyForward [pdf]` | Show the paragraph at the source cursor. |
-| `:PdftyMove <page>` | Jump to an absolute page, numbered from 1. |
-| `:PdftyNext [count]` | Advance by one page, or by the given count. |
-| `:PdftyPrev [count]` | Go back by one page, or by the given count. |
-| `:PdftyFirst` / `:PdftyLast` | Jump to the first / last page. |
-| `:PdftyZoom <percent\|in\|out\|reset>` | Set zoom to 50–300%, adjust by 25%, or reset zoom and pan. |
-| `:PdftyView [single\|scroll\|toggle]` | Set the view mode; no argument toggles it. |
-| `:PdftyReload` | Reload the PDF from disk. |
-| `:PdftyCenter` | Pan/scroll so the point under the cursor is centered; preserve its document position and zoom. |
-| `:PdftyClear` | Remove text selection and forward/inverse search outlines. |
-| `:PdftySwitch [pdf]` | Choose an open PDF, or switch to the given path. |
-| `:PdftyNextPdf` / `:PdftyPrevPdf` | Cycle through PDFs in the viewer. |
+| `:Pdfty [pdf]` | Toggle the side panel. |
+| `:PdftyFocus [pdf]` | Focus the panel, or hide it when it is focused. |
+| `:PdftyOpen [pdf]` / `:PdftyClose` | Show (and add the PDF) / hide the panel. |
+| `:PdftyAdd [pdf]` | Add the compiled PDF (VimTeX's, or the one beside the TeX file). |
+| `:PdftyRegister [pdf]` | Pair the current buffer with a viewer. |
+| `:PdftyForward [pdf]` | Show and outline the paragraph at the cursor. |
+| `:PdftyMove <page>` | Go to a page (1-based). |
+| `:PdftyNext [n]` / `:PdftyPrev [n]` | Move by pages. |
+| `:PdftyFirst` / `:PdftyLast` | First / last page. |
+| `:PdftyZoom <25–500\|in\|out\|reset>` | Set or step the zoom. |
+| `:PdftyView [single\|scroll\|toggle]` | Set the view mode. |
+| `:PdftyReload` | Reload the PDF. |
+| `:PdftyCenter` | Center the point under the viewer cursor. |
+| `:PdftyClear` | Clear selection and outline. |
+| `:PdftySwitch [pdf]` | Pick or show an open PDF. |
+| `:PdftyNextPdf` / `:PdftyPrevPdf` | Cycle PDFs in the viewer. |
 
-Relative page movement stops at the first or last page. An absolute page outside
-the document's range reports an error in the viewer. Zoom and view arguments
-have command completion.
+## Code layout
 
-Example mappings:
-
-```lua
-vim.keymap.set("n", "<leader>pf", "<Cmd>PdftyForward<CR>")
-vim.keymap.set("n", "<leader>pj", "<Cmd>PdftyNext<CR>")
-vim.keymap.set("n", "<leader>pk", "<Cmd>PdftyPrev<CR>")
-vim.keymap.set("n", "<leader>pp", "<Cmd>PdftySwitch<CR>")
-```
-
-Inverse search uses the server paired by the plugin, falling back to
-`/tmp/vimtexserver.txt` when no editor is paired, and
-opens the SyncTeX source with `nvr --nostart --servername <server> --remote-solent <file>
--c <line>`. Write the active server address to that file from Neovim, for example
-with `vim.fn.writefile({vim.v.servername}, '/tmp/vimtexserver.txt')`.
-
-## Viewer keys and examples
-
-Type a number before a movement key to repeat it. Counts work with
-`w`/`a`/`s`/`d`, page and scroll navigation, `H`/`J`/`K`/`L` panning,
-zoom (`=`/`+`/`-`), and PDF switching (`[`/`]`). Counts are consumed by the
-next key. Backspace edits a pending count; Escape cancels it. Bare `0` still
-resets zoom. Page movement stops at the document's ends; cursor movement stays
-inside the viewport and pans or scrolls when it reaches an edge.
-
-| Keys | Action |
+| File | Role |
 | --- | --- |
-| `10w` | Move the cursor up ten cells. |
-| `5d` | Move the cursor right five cells. |
-| `3j` / `3k` | Move three pages in single view, or scroll nine rows in continuous view. |
-| `2=` | Zoom in by 50 percentage points. |
-| `4H` | Pan left sixteen cells. |
-| `10g`, `10G`, or `10` then Enter | Jump to page 10. |
-| `v`, `5s`, `y` | Anchor selection at the cursor, extend down five cells, then copy. |
-| `c` | Center the document point under the cursor. |
-| Shift+I (`I`) | Run inverse search and focus the paired Neovim pane/window. |
-| Escape | Remove all selection/search highlights and cancel a pending count. |
-| `t` / `0` / `?` / `q` | Toggle view / reset zoom / show help / quit. |
+| `src/app/mod.rs` | State, event loop, documents, tile cache and render scheduling |
+| `src/app/draw.rs` | Frame composition, row diffing, terminal scroll reuse, status line, panels |
+| `src/app/view.rs` | Scrolling, paging, zoom, cursor, tile addressing and overlays |
+| `src/app/input.rs` | Keys and mouse |
+| `src/app/search.rs` | IPC commands, SyncTeX search, selection, clipboard |
+| `src/render.rs` | MuPDF worker pool: tiles, overlays, text extraction |
+| `src/layout.rs` | Page placement on a cell canvas (pure, tested) |
+| `src/kitty.rs` | Graphics protocol, placeholders, tmux passthrough |
+| `src/synctex.rs` | SyncTeX parser with forward and inverse queries |
+| `src/nvim.rs` | Neovim msgpack-RPC client and focus handling |
+| `src/ipc.rs` | Per-PDF and control Unix sockets |
+| `lua/pdfty/init.lua` | Neovim commands, viewer pairing, inverse-search target window |
+| `lua/pdfty/terminal.lua` | The side panel: split, viewer job, outer tty detection |
 
-Counts do not repeat selection, copy, inverse search, reload, or view toggles.
-
-Keys: `h`/`l` or arrow keys change pages, `[`/`]` switch PDFs, `g`/`G` jump to the ends, `r` reloads,
-right click or `i` runs inverse search, Shift+I also focuses Neovim, and `q` quits. Press `?` for the full
-shortcut menu; use Up/Down or Page Up/Down to scroll it and `?` or Escape to close it.
-Press `:`, type a page number,
-then Enter to jump to that page. Backspace edits the number; Escape cancels the prompt.
-Shift+I selects Neovim’s tmux session, window, and pane. For a separate Kitty
-window, it uses Kitty remote control (`kitten @ focus-window`), which must be
-enabled in Kitty. Plain `i`, Enter, and right-click keep focus in the viewer.
-
-Press `v` to start
-a keyboard selection at the cursor and use `w`/`a`/`s`/`d` to extend it; Escape clears all selection and search highlights.
-Press `y` to copy the selected text. Selection currently snaps to whole PDF text lines.
-
-Press `t` to switch between single-page and continuous scroll views. In scroll view,
-`j`/`k`, the arrow keys, Page Up/Down, or the mouse wheel scroll through pages.
-In either view, `=` zooms in, `-` zooms out, and `0` resets to 100%.
-At high zoom, `H`/`L` pan horizontally; in single-page view, `J`/`K` pan vertically.
-The cursor has a black block background and is always visible on the PDF, including when another pane
-has focus. `w`/`a`/`s`/`d` move it up/left/down/right. At a viewport edge,
-movement pans a zoomed page or scrolls continuous view so the cursor stays visible.
-Press `v` to anchor selection at the cursor, then use the same keys to extend it.
-The cursor turns blue during selection; Escape clears all highlights.
-Press `c` (or `:PdftyCenter` from Neovim) to pan or scroll the document so
-the point under the cursor appears at the screen center. The cursor stays on
-the same document point, and zoom and selection stay unchanged. Blank margins
-allow centering points near page edges. Use `:PdftyClear` from Neovim to remove selection and search highlights. A selection
-stays within its starting page. Forward search moves the cursor to its target.
-The mouse wheel pans vertically in single-page view when zoomed, and scrolls the document
-in continuous view. A horizontal wheel gesture or Shift + vertical wheel pans horizontally
-in either view when the page is wider than the pane.
-All pages are rendered in the background after the first page appears. The top
-bar shows the current page, zoom, prepared page count, status, and frame rate.
-Three lines below the PDF keep the latest SyncTeX and `nvr` calls and their
-results visible. The bottom bar shows the view mode, Neovim connection, and
-socket name.
-Rendering uses a high resolution image sized for the
-pane width, including in scroll view. PNGs use 12 pixels per terminal column;
-their pixel height follows the terminal's measured cell aspect ratio (24 pixels
-when the terminal does not report it).
-Scroll frames are composed in a background worker and displayed with `kitten icat`.
-The viewer supplies the window dimensions and captures `icat`'s escape codes so
-`icat` never queries the terminal or changes its input modes.
-Each frame uses a fresh 24-bit image ID. Image placeholders and the search
-marker are updated together using synchronized output. Focus changes reuse the
-existing image. Inside tmux, the viewer sets `allow-passthrough=all` for its own
-pane so image commands survive redraws, and restores the previous setting on exit.
-
-The viewer creates a control socket, a socket per added PDF, and a temporary PNG
-directory per process, and removes them on exit.
-
-## Rust code organization
-
-`src/app.rs` owns viewer state and the event loop. The modules in `src/app/`
-separate input, geometry, cursor/navigation, document lifecycle, selection,
-render scheduling, frame placement, status/help, and Neovim integration.
-
-`src/image.rs` exposes the image API; `src/image/compose.rs` handles raster
-composition/cache reuse, `overlays.rs` derives highlights, and `transport.rs`
-emits Kitty image commands. `src/synctex/focus.rs` handles terminal focus after
-a successful source jump. Module and method comments describe coordinate units,
-state ownership, and how outdated background work is rejected.
-
-## Testing with the sample
-
-Build the LaTeX fixture after changing `sample/main.tex`, then run the Rust tests:
+## Tests
 
 ```sh
-cd sample
-latexmk -lualatex -synctex=1 -outdir=build main.tex
-cd ..
-cargo test --offline
+cd sample && latexmk -lualatex -synctex=1 -outdir=build main.tex && cd ..
+cargo test
 nvim --headless -u NONE -l tests/nvim_commands.lua
+cargo build --release && nvim --headless -u NONE -l tests/panel.lua
 ```
 
-The tests render `sample/build/main.pdf` and check forward and inverse SyncTeX
-mapping. To try the Neovim workflow, start `pdfty` and open
-`sample/main.tex` in Neovim with this repository on `runtimepath`. Run
-`:PdftyAdd`; then right-click the PDF for inverse search or use
-`:PdftyForward` for forward search.
+`tests/panel.lua` runs the real viewer in the panel and checks forward and
+inverse search, focus, toggling and cleanup.
+
+The Rust tests render the sample with MuPDF, round-trip SyncTeX on it, and
+cover the layout, placeholder encoding, IPC and the Neovim RPC client.

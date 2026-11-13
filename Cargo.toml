@@ -1,10 +1,18 @@
 [package]
 name = "pdfty"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Fast PDF previewer for Kitty and tmux with Neovim SyncTeX integration"
 
 [dependencies]
+# MuPDF is compiled from source and linked statically; no mutool/pdfinfo needed.
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
 crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+flate2 = "1"
+rmpv = "1"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"

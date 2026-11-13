@@ -1,6 +1,7 @@
 local M = {}
 local config
 local state = { keymaps = {} }
+local terminal = require("pdfty.terminal")
 
 local defaults = {
     command = "pdfty",
@@ -9,6 +10,15 @@ local defaults = {
     register_events = { "BufEnter", "BufWritePost", "FocusLost" },
     notifications = true,
     keymaps = {},
+    debug_lines = true,                -- show the last three log lines under the page (toggle with D)
+    terminal = {
+        split_side = "right",          -- "left" or "right"
+        split_width_percentage = 0.40,
+        auto_insert = true,            -- enter terminal mode when the panel is focused
+        auto_close = true,             -- close the panel when the viewer exits
+        auto_open = true,              -- :PdftyAdd / :PdftyForward open the panel when no viewer runs
+        navigation_keys = true,        -- Ctrl-H/J/K/L in the panel move to the neighbouring window
+    },
 }
 
 local function report(message, level)
@@ -64,13 +74,36 @@ local function source_for_buffer()
 	return canonical(source)
 end
 
-local function synctex_matches(pdf, source, line, column)
-	local input = string.format("%d:%d:%s", line, column, source)
-	local output = vim.fn.systemlist({ "synctex", "view", "-i", input, "-o", pdf })
-	return vim.v.shell_error == 0 and table.concat(output, "\n"):find("SyncTeX result begin", 1, true) ~= nil
+-- The compiled PDF for the current buffer: explicit path, resolve_pdf/VimTeX,
+-- or a PDF beside the source (or in its build/ directory).
+local function resolve_pdf(requested)
+	if requested and requested ~= "" then
+		local pdf = canonical(requested)
+		return vim.fn.filereadable(pdf) == 1 and pdf or nil
+	end
+	local pdf = vimtex_pdf()
+	if pdf then
+		return pdf
+	end
+	local source = source_for_buffer()
+	if not source then
+		return nil
+	end
+	local dir, name = vim.fn.fnamemodify(source, ":h"), vim.fn.fnamemodify(source, ":t:r")
+	for _, candidate in ipairs({ dir .. "/" .. name .. ".pdf", dir .. "/build/" .. name .. ".pdf" }) do
+		if vim.fn.filereadable(candidate) == 1 then
+			return canonical(candidate)
+		end
+	end
 end
 
-local function find_viewer(source, line, column, requested_pdf)
+-- Whether the viewer's PDF was built from this source (reads its SyncTeX file).
+local function builds_from(pdf, source)
+	vim.fn.systemlist({ viewer_command(), "--has-source", pdf, source })
+	return vim.v.shell_error == 0
+end
+
+local function find_viewer(source, requested_pdf)
 	local viewers, err = active_viewers()
 	if not viewers then
 		return nil, err
@@ -96,7 +129,7 @@ local function find_viewer(source, line, column, requested_pdf)
 		end
 	end
 	for _, viewer in ipairs(viewers) do
-		if source and viewer.pdf and synctex_matches(viewer.pdf, source, line, column) then
+		if source and viewer.pdf and builds_from(viewer.pdf, source) then
 			return viewer
 		end
 	end
@@ -157,6 +190,30 @@ local function server_name()
 	return server
 end
 
+-- Make sure the side panel shows `pdf`, then call back with its socket once
+-- the viewer has opened it.
+local function with_panel_viewer(pdf, callback)
+	if terminal.is_running() then
+		terminal.open(nil, false)
+		send_to(terminal.control_socket(), { action = "add", pdf = pdf, nvim = server_name() }, false)
+	else
+		terminal.open(pdf, false)
+	end
+	local socket = vim.trim(vim.fn.system({ config.command, "--get-socket", pdf }))
+	local tries = 0
+	local function check()
+		if vim.uv.fs_stat(socket) then
+			callback({ socket = socket, pdf = pdf })
+		elseif tries < 50 and terminal.is_running() then
+			tries = tries + 1
+			vim.defer_fn(check, 100)
+		else
+			report("pdfty: the viewer did not open " .. pdf, vim.log.levels.ERROR)
+		end
+	end
+	check()
+end
+
 local function send(action, requested_pdf, notify)
 	local source = source_for_buffer()
 	if not source then
@@ -166,18 +223,24 @@ local function send(action, requested_pdf, notify)
 		return
 	end
 	local pos = vim.api.nvim_win_get_cursor(0)
-	local viewer, err = find_viewer(source, pos[1], pos[2] + 1, requested_pdf)
-	if not viewer then
-		if notify then
-			report("pdfty: " .. err, vim.log.levels.ERROR)
+	local function deliver(viewer)
+		local message = { action = action, pdf = viewer.pdf, nvim = server_name() }
+		if action == "forward" then
+			message.source, message.line, message.column = source, pos[1], pos[2] + 1
 		end
-		return
+		send_to(viewer.socket, message, notify)
 	end
-	local message = { action = action, pdf = viewer.pdf, nvim = server_name() }
-	if action == "forward" then
-		message.source, message.line, message.column = source, pos[1], pos[2] + 1
+	local viewer, err = find_viewer(source, requested_pdf)
+	if viewer then
+		return deliver(viewer)
 	end
-	send_to(viewer.socket, message, notify)
+	local pdf = action == "forward" and config.terminal.auto_open and resolve_pdf(requested_pdf)
+	if pdf then
+		return with_panel_viewer(pdf, deliver)
+	end
+	if notify then
+		report("pdfty: " .. err, vim.log.levels.ERROR)
+	end
 end
 
 local function register_commands()
@@ -187,15 +250,14 @@ local function register_commands()
 			report("pdfty: open a TeX source file first", vim.log.levels.ERROR)
 			return
 		end
-		local pdf = opts.args ~= "" and canonical(opts.args) or vimtex_pdf()
+		local pdf = resolve_pdf(opts.args)
 		if not pdf then
-			local sibling = source and source:gsub("%.tex$", ".pdf")
-			if sibling and vim.fn.filereadable(sibling) == 1 then
-				pdf = sibling
-			end
-		end
-		if not pdf or vim.fn.filereadable(pdf) ~= 1 then
 			report("pdfty: compiled PDF not found; pass its path to :PdftyAdd", vim.log.levels.ERROR)
+			return
+		end
+		if terminal.is_running() then
+			terminal.open(nil, false)
+			send_to(terminal.control_socket(), { action = "add", pdf = pdf, nvim = server_name() }, true)
 			return
 		end
 		local viewers, err = active_viewers()
@@ -209,8 +271,33 @@ local function register_commands()
 				return
 			end
 		end
+		if config.terminal.auto_open then
+			terminal.open(pdf, false)
+			return
+		end
 		report("pdfty: no control socket; start pdfty without arguments or with --synctex", vim.log.levels.ERROR)
 	end, { nargs = "?", complete = "file" })
+
+	-- Side panel, like claudecode.nvim's :ClaudeCode / :ClaudeCodeFocus.
+	local function panel_pdf(args)
+		return resolve_pdf(args)
+	end
+	vim.api.nvim_create_user_command("Pdfty", function(opts)
+		terminal.toggle(panel_pdf(opts.args))
+	end, { nargs = "?", complete = "file", desc = "Toggle the pdfty side panel" })
+	vim.api.nvim_create_user_command("PdftyFocus", function(opts)
+		terminal.focus(panel_pdf(opts.args))
+	end, { nargs = "?", complete = "file", desc = "Focus the pdfty panel, or hide it when focused" })
+	vim.api.nvim_create_user_command("PdftyOpen", function(opts)
+		local pdf = panel_pdf(opts.args)
+		if terminal.is_running() and pdf then
+			send_to(terminal.control_socket(), { action = "add", pdf = pdf, nvim = server_name() }, true)
+		end
+		terminal.open(pdf, true)
+	end, { nargs = "?", complete = "file", desc = "Open the pdfty panel (and the given or current PDF)" })
+	vim.api.nvim_create_user_command("PdftyClose", function()
+		terminal.close()
+	end, { desc = "Hide the pdfty panel; the viewer keeps running" })
 
 	vim.api.nvim_create_user_command("PdftyRegister", function(opts)
 		send("register", opts.args ~= "" and opts.args or nil, true)
@@ -221,9 +308,7 @@ local function register_commands()
 	end, { nargs = "?", complete = "file", desc = "Show the PDF paragraph at the source cursor" })
 
 	local function control(command, fields, requested_pdf)
-		local source = source_for_buffer()
-		local pos = vim.api.nvim_win_get_cursor(0)
-		local viewer, err = find_viewer(source, pos[1], pos[2] + 1, requested_pdf)
+		local viewer, err = find_viewer(source_for_buffer(), requested_pdf)
 		if not viewer then
 			report("pdfty: " .. err, vim.log.levels.ERROR)
 			return
@@ -302,15 +387,15 @@ local function register_commands()
 		if commands[opts.args] then
 			control(commands[opts.args])
 		else
-			local percent = integer(opts.args, 50, 300, "zoom percent")
+			local percent = integer(opts.args, 25, 500, "zoom percent")
 			if percent then
 				control("zoom", { percent = percent })
 			end
 		end
 	end, {
 		nargs = 1,
-		complete = completion({ "in", "out", "reset", "50", "75", "100", "125", "150", "200", "300" }),
-		desc = "Set zoom (50–300), zoom in/out by 25%, or reset zoom and pan",
+		complete = completion({ "in", "out", "reset", "50", "75", "100", "125", "150", "200", "300", "400" }),
+		desc = "Set zoom (25–500), zoom in/out by 25%, or reset zoom",
 	})
 
 	vim.api.nvim_create_user_command("PdftyView", function(opts)
@@ -364,6 +449,7 @@ local function auto_register()
 end
 
 local mapping_commands = {
+    toggle = "Pdfty", focus = "PdftyFocus",
     add = "PdftyAdd", register = "PdftyRegister", forward = "PdftyForward",
     move = "PdftyMove", next = "PdftyNext", prev = "PdftyPrev",
     first = "PdftyFirst", last = "PdftyLast", switch = "PdftySwitch",
@@ -379,6 +465,53 @@ local function stop_timer()
         if not state.timer:is_closing() then state.timer:close() end
         state.timer = nil
     end
+end
+
+--- Called by the viewer for inverse search (over Neovim's RPC socket).
+--- Shows `file` at `line` in an editor window, never in the panel itself.
+--- Returns true when the panel is in this Neovim, i.e. focus is handled here.
+function M.open_source(file, line, focus)
+	local panel = terminal.window()
+	local buf = vim.fn.bufadd(file)
+	local function usable(win)
+		if not vim.api.nvim_win_is_valid(win) or terminal.is_panel_window(win) then
+			return false
+		end
+		if vim.api.nvim_win_get_config(win).relative ~= "" then
+			return false
+		end
+		return vim.bo[vim.api.nvim_win_get_buf(win)].buftype == ""
+	end
+	local windows = vim.tbl_filter(usable, vim.api.nvim_tabpage_list_wins(0))
+	local target
+	for _, win in ipairs(windows) do
+		if vim.api.nvim_win_get_buf(win) == buf then
+			target = win
+		end
+	end
+	if not target and state.editor_win and vim.tbl_contains(windows, state.editor_win) then
+		target = state.editor_win
+	end
+	target = target or windows[1]
+	if not target then
+		local side = config.terminal.split_side == "left" and "botright" or "topleft"
+		vim.cmd(side .. " vsplit")
+		target = vim.api.nvim_get_current_win()
+	end
+	vim.api.nvim_win_call(target, function()
+		vim.cmd("normal! m'")
+		if vim.api.nvim_win_get_buf(target) ~= buf then
+			vim.cmd("keepalt buffer " .. buf)
+		end
+		line = math.max(1, math.min(line, vim.api.nvim_buf_line_count(buf)))
+		vim.api.nvim_win_set_cursor(target, { line, 0 })
+		vim.cmd("normal! zvzz")
+	end)
+	if focus then
+		vim.api.nvim_set_current_win(target)
+		vim.cmd("stopinsert")
+	end
+	return panel ~= nil
 end
 
 function M.setup(opts)
@@ -397,8 +530,15 @@ function M.setup(opts)
         assert(mapping_commands[action], "pdfty: unknown keymap action " .. tostring(action))
         assert(lhs == false or (type(lhs) == "string" and lhs ~= ""), "pdfty: keymap must be a nonempty string or false")
     end
+    assert(type(next_config.debug_lines) == "boolean", "pdfty: debug_lines must be boolean")
+    assert(type(next_config.terminal) == "table", "pdfty: terminal must be a table")
+    assert(next_config.terminal.split_side == "left" or next_config.terminal.split_side == "right",
+        "pdfty: terminal.split_side must be \"left\" or \"right\"")
+    local pct = next_config.terminal.split_width_percentage
+    assert(type(pct) == "number" and pct > 0 and pct < 1, "pdfty: terminal.split_width_percentage must be between 0 and 1")
     stop_timer()
     config = next_config
+    terminal.setup(config)
     M.config = config
     M.configured = true
     local group = vim.api.nvim_create_augroup("Pdfty", { clear = true })
@@ -421,6 +561,18 @@ function M.setup(opts)
             table.insert(state.keymaps, lhs)
         end
     end
+    -- Remember the last editor window so inverse search lands there.
+    vim.api.nvim_create_autocmd("WinLeave", {
+        group = group,
+        callback = function()
+            local win = vim.api.nvim_get_current_win()
+            if not terminal.is_panel_window(win) and vim.bo.buftype == ""
+                and vim.api.nvim_win_get_config(win).relative == "" then
+                state.editor_win = win
+            end
+        end,
+    })
+    vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = terminal.stop })
     if config.auto_register then
         if #config.register_events > 0 then
             vim.api.nvim_create_autocmd(config.register_events, {

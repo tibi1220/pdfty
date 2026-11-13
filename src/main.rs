@@ -1,120 +1,124 @@
 mod app;
-mod cache;
-mod image;
 mod ipc;
-mod reload;
+mod kitty;
+mod layout;
+mod nvim;
 mod render;
-mod resolution;
 mod synctex;
 mod terminal;
 mod text;
+mod watch;
 
-use std::{env, ffi::OsString, path::PathBuf, process::Command};
+use std::{ffi::OsString, path::PathBuf};
 
-const USAGE: &str = "usage: pdfty [file.pdf ...] [--synctex]\n       pdfty <file.pdf> --get-socket\n       pdfty --list | -l";
+const USAGE: &str = "usage: pdfty [file.pdf ...] [--synctex] [--no-debug-lines]
+       pdfty <file.pdf> --get-socket
+       pdfty --list | -l
+       pdfty --has-source <file.pdf> <source.tex>
 
-/// Parsed CLI modes. Socket lookup and listing never enter the terminal UI.
+Environment: PDFTY_TRANSFER=file|direct selects how pixels reach the terminal
+(default: file locally, direct over SSH).";
+
+/// Parsed CLI modes. Only `View` enters the terminal UI.
 enum Action {
-    View { pdfs: Vec<PathBuf>, synctex: bool },
+    View { pdfs: Vec<PathBuf>, synctex: bool, debug_lines: bool },
     GetSocket(PathBuf),
     List,
+    HasSource(PathBuf, PathBuf),
     Help,
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("pdfty: {error}");
-        std::process::exit(1);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("pdfty: {error}");
+            std::process::exit(2);
+        }
     }
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
-    let mut pdfs = Vec::new();
-    let mut synctex = false;
-    let mut get_socket = false;
-    let mut list = false;
-    let mut help = false;
+    let mut paths = Vec::new();
+    let (mut synctex, mut get_socket, mut list, mut help, mut has_source) = (false, false, false, false, false);
+    let mut debug_lines = true;
     for arg in args {
         match arg.to_str() {
             Some("--synctex") => synctex = true,
             Some("--get-socket") => get_socket = true,
             Some("--list" | "-l") => list = true,
             Some("--help" | "-h") => help = true,
-            Some(option) if option.starts_with('-') => {
-                return Err(format!("unknown option: {option}\n{USAGE}"))
-            }
-            _ => pdfs.push(PathBuf::from(arg)),
+            Some("--has-source") => has_source = true,
+            Some("--debug-lines") => debug_lines = true,
+            Some("--no-debug-lines") => debug_lines = false,
+            Some(option) if option.starts_with('-') => return Err(format!("unknown option: {option}\n{USAGE}")),
+            _ => paths.push(PathBuf::from(arg)),
         }
     }
-    if help && !list && !get_socket && !synctex && pdfs.is_empty() {
-        return Ok(Action::Help);
-    }
-    if list && pdfs.is_empty() && !get_socket && !synctex && !help {
-        return Ok(Action::List);
-    }
-    if list || help {
+    let modes = [get_socket, list, help, has_source].iter().filter(|&&m| m).count();
+    if modes > 1 {
         return Err(USAGE.into());
     }
-    if get_socket {
-        if pdfs.len() != 1 {
-            return Err(USAGE.into());
-        }
-        Ok(Action::GetSocket(pdfs.remove(0)))
-    } else {
-        Ok(Action::View {
-            synctex: synctex || pdfs.is_empty(),
-            pdfs,
-        })
+    if help {
+        return if paths.is_empty() && !synctex { Ok(Action::Help) } else { Err(USAGE.into()) };
     }
+    if list {
+        return if paths.is_empty() && !synctex { Ok(Action::List) } else { Err(USAGE.into()) };
+    }
+    if has_source {
+        return match <[PathBuf; 2]>::try_from(paths) {
+            Ok([pdf, source]) => Ok(Action::HasSource(pdf, source)),
+            Err(_) => Err(USAGE.into()),
+        };
+    }
+    if get_socket {
+        return match <[PathBuf; 1]>::try_from(paths) {
+            Ok([pdf]) => Ok(Action::GetSocket(pdf)),
+            Err(_) => Err(USAGE.into()),
+        };
+    }
+    // A blank viewer enables IPC so Neovim can add its first PDF.
+    Ok(Action::View { synctex: synctex || paths.is_empty(), pdfs: paths, debug_lines })
 }
 
+/// The canonical path is shared by the socket hash and the IPC identity check,
+/// so relative paths and symlinks refer to one viewer.
 fn canonical_pdf(path: PathBuf) -> Result<PathBuf, String> {
-    // The canonical path is shared by the socket hash and IPC identity check.
-    // Resolving it here makes relative paths and symlinks refer to one viewer.
-    let pdf = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-    if pdf.extension().and_then(|x| x.to_str()) != Some("pdf") {
-        return Err("expected a .pdf file".into());
+    let pdf = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !pdf.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf")) {
+        return Err(format!("{}: expected a .pdf file", path.display()));
     }
     Ok(pdf)
 }
 
-fn run() -> Result<(), String> {
-    match parse_args(env::args_os().skip(1))? {
+fn run() -> Result<i32, String> {
+    match parse_args(std::env::args_os().skip(1))? {
         Action::Help => println!("{USAGE}"),
         Action::List => {
             for (socket, pdf) in ipc::active_sockets()? {
-                if let Some(pdf) = pdf {
-                    println!("{}\t{}", socket.display(), pdf.display());
-                } else {
-                    println!("{}", socket.display());
+                match pdf {
+                    Some(pdf) => println!("{}\t{}", socket.display(), pdf.display()),
+                    None => println!("{}", socket.display()),
                 }
             }
         }
         Action::GetSocket(pdf) => println!("{}", ipc::socket_path(&canonical_pdf(pdf)?).display()),
-        Action::View { pdfs, synctex } => {
-            let pdfs = pdfs
-                .into_iter()
-                .map(canonical_pdf)
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut required = vec!["mutool", "pdfinfo", "kitten"];
-            if synctex {
-                required.extend(["synctex", "nvr"]);
-            }
-            for tool in required {
-                if Command::new("which")
-                    .arg(tool)
-                    .output()
-                    .map(|o| !o.status.success())
-                    .unwrap_or(true)
-                {
-                    return Err(format!("missing command: {tool}"));
+        Action::HasSource(pdf, source) => {
+            let found = synctex::Synctex::load(&pdf).is_ok_and(|s| s.has_source(&source));
+            return Ok(if found { 0 } else { 1 });
+        }
+        Action::View { pdfs, synctex, debug_lines } => {
+            let mut unique = Vec::new();
+            for pdf in pdfs {
+                let pdf = canonical_pdf(pdf)?;
+                if !unique.contains(&pdf) {
+                    unique.push(pdf);
                 }
             }
-            // A blank viewer enables IPC so Neovim can add its first PDF.
-            app::run(pdfs, synctex)?;
+            app::run(unique, synctex, debug_lines)?;
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -122,39 +126,27 @@ mod tests {
     use super::{parse_args, Action};
     use std::ffi::OsString;
 
-    fn parse(args: &[&str]) -> Action {
-        parse_args(args.iter().map(OsString::from)).unwrap()
+    fn parse(args: &[&str]) -> Result<Action, String> {
+        parse_args(args.iter().map(OsString::from))
     }
 
     #[test]
     fn cli_modes_are_distinct() {
-        assert!(matches!(parse(&["-l"]), Action::List));
-        assert!(matches!(parse(&["--list"]), Action::List));
-        assert!(matches!(
-            parse(&["--get-socket", "sample/build/main.pdf"]),
-            Action::GetSocket(_)
-        ));
-        assert!(matches!(
-            parse(&["sample/build/main.pdf", "--get-socket"]),
-            Action::GetSocket(_)
-        ));
-        assert!(matches!(
-            parse(&["sample/build/main.pdf"]),
-            Action::View { synctex: false, .. }
-        ));
-        assert!(matches!(
-            parse(&["--synctex", "sample/build/main.pdf"]),
-            Action::View { synctex: true, .. }
-        ));
-        assert!(matches!(parse(&[]), Action::View { synctex: true, pdfs } if pdfs.is_empty()));
-        assert!(
-            matches!(parse(&["a.pdf", "b.pdf", "--synctex"]), Action::View { synctex: true, pdfs } if pdfs.len() == 2)
-        );
-        assert!(matches!(
-            parse(&["--synctex", "--get-socket", "sample/build/main.pdf"]),
-            Action::GetSocket(_)
-        ));
-        assert!(parse_args(["--list".into(), "sample/build/main.pdf".into()]).is_err());
-        assert!(parse_args(["--get-socket".into(), "a.pdf".into(), "b.pdf".into()]).is_err());
+        assert!(matches!(parse(&["-l"]), Ok(Action::List)));
+        assert!(matches!(parse(&["--list"]), Ok(Action::List)));
+        assert!(matches!(parse(&["--get-socket", "a.pdf"]), Ok(Action::GetSocket(_))));
+        assert!(matches!(parse(&["a.pdf", "--get-socket"]), Ok(Action::GetSocket(_))));
+        assert!(matches!(parse(&["a.pdf"]), Ok(Action::View { synctex: false, .. })));
+        assert!(matches!(parse(&["--synctex", "a.pdf"]), Ok(Action::View { synctex: true, .. })));
+        assert!(matches!(parse(&[]), Ok(Action::View { synctex: true, pdfs, .. }) if pdfs.is_empty()));
+        assert!(matches!(parse(&["a.pdf", "b.pdf", "--synctex"]), Ok(Action::View { synctex: true, pdfs, .. }) if pdfs.len() == 2));
+        assert!(matches!(parse(&["--has-source", "a.pdf", "a.tex"]), Ok(Action::HasSource(..))));
+        assert!(parse(&["--has-source", "a.pdf"]).is_err());
+        assert!(parse(&["--list", "a.pdf"]).is_err());
+        assert!(parse(&["--get-socket", "a.pdf", "b.pdf"]).is_err());
+        assert!(parse(&["--list", "--get-socket", "a.pdf"]).is_err());
+        assert!(parse(&["--bogus"]).is_err());
+        assert!(matches!(parse(&["a.pdf"]), Ok(Action::View { debug_lines: true, .. })));
+        assert!(matches!(parse(&["--no-debug-lines", "a.pdf"]), Ok(Action::View { debug_lines: false, .. })));
     }
 }
